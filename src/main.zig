@@ -1,7 +1,3 @@
-//! By convention, main.zig is where your main function lives in the case that
-//! you are building an executable. If you are making a library, the convention
-//! is to delete this file and start with root.zig instead.
-
 const VSCodeConfig = struct {
     steps: ArrayList(BuildStep),
     project_name: []const u8,
@@ -18,6 +14,14 @@ const VSCodeConfig = struct {
             custom,
         };
     };
+
+    pub fn deinit(self: *@This(), allocator: Allocator) void {
+        for (self.steps.items) |item| {
+            allocator.free(item.name);
+            allocator.free(item.description);
+        }
+        self.steps.deinit();
+    }
 };
 
 pub fn main() !void {
@@ -39,7 +43,8 @@ pub fn main() !void {
     // Check if build.zig exists
     const build_zig_path = try std.fs.path.join(allocator, &[_][]const u8{ input_dir, "build.zig" });
     defer allocator.free(build_zig_path);
-std.fs.accessAbsolute(build_zig_path, .{}) catch |err| {
+    
+    std.fs.accessAbsolute(build_zig_path, .{}) catch |err| {
         print("Error: Cannot access build.zig at {s}: {}\n", .{ build_zig_path, err });
         return;
     };
@@ -47,8 +52,8 @@ std.fs.accessAbsolute(build_zig_path, .{}) catch |err| {
     print("Found build.zig at: {s}\n", .{build_zig_path});
 
     // Parse build steps using `zig build -l`
-    const config = try parseBuildSteps(allocator, input_dir);
-    defer config.steps.deinit();
+    var config = try parseBuildSteps(allocator, input_dir);
+    defer config.deinit(allocator);
 
     // Create output directory if it doesn't exist
     std.fs.makeDirAbsolute(output_dir) catch |err| switch (err) {
@@ -91,40 +96,36 @@ fn parseBuildSteps(allocator: Allocator, input_dir: []const u8) !VSCodeConfig {
         return error.ZigBuildFailed;
     }
 
-    // Parse the output
+    print("Raw zig build -l output:\n{s}\n", .{stdout});
+
+    // Parse the output - look for lines that start with "  " (two spaces)
     var lines = std.mem.splitScalar(u8, stdout, '\n');
-    var in_steps_section = false;
 
     while (lines.next()) |line| {
-        const trimmed = std.mem.trim(u8, line, " \t\r\n");
-        if (trimmed.len == 0) continue;
-
-        // Look for the steps section
-        if (std.mem.indexOf(u8, trimmed, "Steps:") != null) {
-            in_steps_section = true;
-            continue;
-        }
-
-        if (in_steps_section and std.mem.startsWith(u8, trimmed, "  ")) {
-            // Parse step line: "  step_name    description"
-            const step_line = std.mem.trim(u8, trimmed, " ");
-            var parts = std.mem.splitScalar(u8, step_line, ' ');
-            const step_name = parts.next() orelse continue;
+        // Look for lines that start with exactly two spaces followed by a step name
+        if (line.len > 2 and line[0] == ' ' and line[1] == ' ' and line[2] != ' ') {
+            const step_line = std.mem.trim(u8, line, " \t\r\n");
             
-            // Skip empty parts and collect description
-            var description_parts = ArrayList([]const u8).init(allocator);
-            defer description_parts.deinit();
-            
-            while (parts.next()) |part| {
-                if (part.len > 0) {
-                    try description_parts.append(part);
+            // Find the first whitespace to separate step name from description
+            var space_index: ?usize = null;
+            for (step_line, 0..) |char, i| {
+                if (char == ' ' or char == '\t') {
+                    space_index = i;
+                    break;
                 }
             }
             
-            const description = if (description_parts.items.len > 0)
-                try std.mem.join(allocator, " ", description_parts.items)
+            const step_name = if (space_index) |idx| 
+                step_line[0..idx]
+            else 
+                step_line;
+            
+            const description = if (space_index) |idx|
+                std.mem.trim(u8, step_line[idx..], " \t")
             else
-                try allocator.dupe(u8, "");
+                "";
+
+            print("Found step: '{s}' with description: '{s}'\n", .{ step_name, description });
 
             // Determine step type
             const step_type = if (std.mem.eql(u8, step_name, "run"))
@@ -138,12 +139,13 @@ fn parseBuildSteps(allocator: Allocator, input_dir: []const u8) !VSCodeConfig {
 
             try config.steps.append(.{
                 .name = try allocator.dupe(u8, step_name),
-                .description = description,
+                .description = try allocator.dupe(u8, description),
                 .step_type = step_type,
             });
         }
     }
 
+    print("Found {} build steps\n", .{config.steps.items.len});
     return config;
 }
 
@@ -179,6 +181,32 @@ fn generateTasksJson(allocator: Allocator, output_dir: []const u8, config: *cons
     try writer.writeAll("{\n");
     try writer.writeAll("    \"version\": \"2.0.0\",\n");
     try writer.writeAll("    \"tasks\": [\n");
+
+    // Always add a default build task first
+    try writer.writeAll("        {\n");
+    try writer.writeAll("            \"label\": \"zig build\",\n");
+    try writer.writeAll("            \"type\": \"shell\",\n");
+    try writer.writeAll("            \"command\": \"zig\",\n");
+    try writer.writeAll("            \"args\": [\"build\"],\n");
+    try writer.writeAll("            \"group\": {\n");
+    try writer.writeAll("                \"kind\": \"build\",\n");
+    try writer.writeAll("                \"isDefault\": true\n");
+    try writer.writeAll("            },\n");
+    try writer.writeAll("            \"presentation\": {\n");
+    try writer.writeAll("                \"echo\": true,\n");
+    try writer.writeAll("                \"reveal\": \"always\",\n");
+    try writer.writeAll("                \"focus\": false,\n");
+    try writer.writeAll("                \"panel\": \"shared\",\n");
+    try writer.writeAll("                \"showReuseMessage\": true,\n");
+    try writer.writeAll("                \"clear\": false\n");
+    try writer.writeAll("            },\n");
+    try writer.writeAll("            \"problemMatcher\": [\"$gcc\"]\n");
+    try writer.writeAll("        }");
+
+    // Add comma if there are more tasks
+    if (config.steps.items.len > 0) {
+        try writer.writeAll(",\n");
+    }
 
     for (config.steps.items, 0..) |step, i| {
         const comma = if (i < config.steps.items.len - 1) "," else "";
@@ -224,40 +252,54 @@ fn generateLaunchJson(allocator: Allocator, output_dir: []const u8, config: *con
     try writer.writeAll("    \"version\": \"0.2.0\",\n");
     try writer.writeAll("    \"configurations\": [\n");
 
-    // Find run steps to create debug configurations
-    var run_configs_added = false;
+    // Find the appropriate build task name
+    var build_task_name: []const u8 = "zig build"; // default
+    var has_build_task = false;
+    
+    for (config.steps.items) |step| {
+        if (std.mem.eql(u8, step.name, "build") or std.mem.eql(u8, step.name, "install")) {
+            build_task_name = try std.fmt.allocPrint(allocator, "zig {s}", .{step.name});
+            has_build_task = true;
+            break;
+        }
+    }
+    defer if (has_build_task) allocator.free(build_task_name);
+
+    // Find one run step to create debug configurations
     for (config.steps.items) |step| {
         if (step.step_type == .run) {
-            if (run_configs_added) {
-                try writer.writeAll(",\n");
-            }
             
             try writer.print("        {{\n", .{});
             try writer.print("            \"name\": \"Debug {s}\",\n", .{config.project_name});
-            try writer.print("            \"type\": \"lldb\",\n", .{});
+            try writer.print("            \"type\": \"cppdbg\",\n", .{});
             try writer.print("            \"request\": \"launch\",\n", .{});
             try writer.print("            \"program\": \"${{workspaceFolder}}/zig-out/bin/{s}\",\n", .{config.project_name});
             try writer.print("            \"args\": [],\n", .{});
+            try writer.print("            \"stopAtEntry\": false,\n", .{});
             try writer.print("            \"cwd\": \"${{workspaceFolder}}\",\n", .{});
-            try writer.print("            \"preLaunchTask\": \"zig {s}\"\n", .{step.name});
+            try writer.print("            \"environment\": [],\n", .{});
+            try writer.print("            \"preLaunchTask\": \"{s}\",\n", .{build_task_name});
+            try writer.print("            \"osx\": {{\n", .{});
+            try writer.print("                \"MIMode\": \"lldb\"\n", .{});
+            try writer.print("            }},\n", .{});
+            try writer.print("            \"linux\": {{\n", .{});
+            try writer.print("                \"MIMode\": \"gdb\",\n", .{});
+            try writer.print("                \"setupCommands\": [\n", .{});
+            try writer.print("                    {{\n", .{});
+            try writer.print("                        \"description\": \"Enable pretty-printing for gdb\",\n", .{});
+            try writer.print("                        \"text\": \"-enable-pretty-printing\",\n", .{});
+            try writer.print("                        \"ignoreFailures\": true\n", .{});
+            try writer.print("                    }}\n", .{});
+            try writer.print("                ]\n", .{});
+            try writer.print("            }},\n", .{});
+            try writer.print("            \"windows\": {{\n", .{});
+            try writer.print("                \"type\": \"cppvsdbg\",\n", .{});
+            try writer.print("                \"console\": \"integratedTerminal\"\n", .{});
+            try writer.print("            }}\n", .{});
             try writer.print("        }}", .{});
             
-            run_configs_added = true;
             break; // Only add one debug configuration
         }
-    }
-
-    if (!run_configs_added) {
-        // Add a default debug configuration
-        try writer.print("        {{\n", .{});
-        try writer.print("            \"name\": \"Debug {s}\",\n", .{config.project_name});
-        try writer.print("            \"type\": \"lldb\",\n", .{});
-        try writer.print("            \"request\": \"launch\",\n", .{});
-        try writer.print("            \"program\": \"${{workspaceFolder}}/zig-out/bin/{s}\",\n", .{config.project_name});
-        try writer.print("            \"args\": [],\n", .{});
-        try writer.print("            \"cwd\": \"${{workspaceFolder}}\",\n", .{});
-        try writer.print("            \"preLaunchTask\": \"zig build\"\n", .{});
-        try writer.print("        }}", .{});
     }
 
     try writer.writeAll("\n    ]\n");
@@ -287,14 +329,14 @@ fn generateSettingsJson(allocator: Allocator, output_dir: []const u8, config: *c
     try file.writeAll(settings_content);
 }
 
-const std = @import("std");
-const print = std.debug.print;
-const ArrayList = std.ArrayList;
-const Allocator = std.mem.Allocator;
-
 test "simple test" {
     var list = std.ArrayList(i32).init(std.testing.allocator);
     defer list.deinit(); // Try commenting this out and see if zig detects the memory leak!
     try list.append(42);
     try std.testing.expectEqual(@as(i32, 42), list.pop());
 }
+
+const std = @import("std");
+const print = std.debug.print;
+const ArrayList = std.ArrayList;
+const Allocator = std.mem.Allocator;
