@@ -128,14 +128,14 @@ fn parseBuildSteps(allocator: Allocator, input_dir: []const u8) !VSCodeConfig {
             print("Found step: '{s}' with description: '{s}'\n", .{ step_name, description });
 
             // Determine step type
-            const step_type = if (std.mem.eql(u8, step_name, "run"))
-                VSCodeConfig.BuildStep.StepType.run
+            const step_type: VSCodeConfig.BuildStep.StepType = if (std.mem.eql(u8, step_name, "run"))
+                .run
             else if (std.mem.eql(u8, step_name, "test"))
-                VSCodeConfig.BuildStep.StepType.@"test"
+                .@"test"
             else if (std.mem.eql(u8, step_name, "build") or std.mem.eql(u8, step_name, "install"))
-                VSCodeConfig.BuildStep.StepType.build
+                .build
             else
-                VSCodeConfig.BuildStep.StepType.custom;
+                .custom;
 
             try config.steps.append(.{
                 .name = try allocator.dupe(u8, step_name),
